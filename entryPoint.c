@@ -4,8 +4,24 @@
 #include <time.h>
 #include <pthread.h>
 #include <unistd.h>
+#include <sched.h>
 
-#define DATASET_SIZE 200
+
+#define DATASET_SIZE 201
+
+typedef struct
+{
+    float* dest;            // Array to store option prices
+    float* spotPrice;       // Pointer to spotPrice array
+    float* strikePrice;     // Pointer to strikePrice array
+    float* riskFreeRate;    // Pointer to riskFreeRate array
+    float* volatility;      // Pointer to volatility array
+    float* timeToMaturity; // Pointer to timeToMaturity array
+    int* optionType;        // Pointer to optionType array
+    size_t size;            // Number of data points to process
+    int num_threads;        // Number of threads
+    int cpu;
+} ThreadArgs;
 
 typedef struct
 {
@@ -139,170 +155,75 @@ float blackScholes(float sptprice, float strike, float rate, float volatility,
     return OptionPrice;
 }
 
-typedef struct
-{
-    OptionData *dataset;
-    int start_index;
-    int end_index;
-} ThreadArg;
 
-void *blackScholesThread(void *arg)
-{
-    ThreadArg *threadArg = (ThreadArg *)arg;
-    OptionData *dataset = threadArg->dataset;
-    int start = threadArg->start_index;
-    int end = threadArg->end_index;
+void* blackScholesWorker(void* args) {
+    // Parse the arguments structure
+    ThreadArgs* p_args = (ThreadArgs*)args;
 
-    for (int i = start; i < end; i++)
-    {
-        float price = blackScholes(dataset[i].spotPrice, dataset[i].strikePrice,
-                                   dataset[i].riskFreeRate, dataset[i].volatility,
-                                   dataset[i].timeToMaturity, dataset[i].optionType);
-        printf("Thread: %ld, Data point: %d, Option Price: %f\n", (unsigned long)pthread_self(), i, price);
+    // Get all the arguments
+    register       float* dest = (      float*)(p_args->dest);
+    register const float*   spotPrice = (const float*)(p_args->spotPrice);
+    register const float*   strikePrice = (const float*)(p_args->strikePrice);
+    register const float*   riskFreeRate = (const float*)(p_args->riskFreeRate);
+    register const float*   volatility = (const float*)(p_args->volatility);
+    register const float*   timeToMaturity = (const float*)(p_args->timeToMaturity);
+    register const int*   optionType = (const int*)(p_args->optionType);
+    register size_t size = p_args->size;
+
+    for (int i = 0; i < size; i++) {
+        dest[i] = blackScholes(spotPrice[i], strikePrice[i], riskFreeRate[i],
+                               volatility[i], timeToMaturity[i], optionType[i]);
     }
-    free(arg);
+
     return NULL;
 }
 
-// void* blackScholesWorker(void *args) {
-//     args_t* p_args = (args_t*)args;
+void impl_parallel(float* output,  float* input0,  float* input1,  float* input2,
+                    float* input3,  float* input4,  int* input5, size_t size, int num_threads) {
+    // Create an array of pthread_t to hold thread IDs
+    pthread_t tid[num_threads];
 
-//     int start = p_args->start;
-//     int end = p_args->end;
-//     float *prices = p_args->prices;
-//     OptionData *dataset = p_args->dataset;
+    // Create an array of args_t to hold thread arguments
+    ThreadArgs thread_args[num_threads];
 
-//     for (int i = start; i < end; i++) {
-//         prices[i] = blackScholes(dataset[i].spotPrice, dataset[i].strikePrice,
-//                                  dataset[i].riskFreeRate, dataset[i].volatility,
-//                                  dataset[i].timeToMaturity, dataset[i].optionType);
-//     }
+    // Calculate the size of work for each thread
+    size_t chunk_size = size / num_threads;
+    size_t remaining = size % num_threads;
+    // Initialize CPU cores to be used by threads
+    int cpu_cores[num_threads];
+    for (int i = 0; i < num_threads; i++) {
+         printf("The value of  is: %d\n", num_threads);
 
-//     return NULL;
-// }
+        cpu_cores[i] = i ; // Assign cores sequentially
+        printf("The value of num is: %d\n", cpu_cores[i]);
 
-// void* impl_parallel(void *args)
-// {
-//     /* Get the argument struct */
-//     args_t* p_args = (args_t*)args;
+    }
 
-//     /* Get all the arguments */
-//     register int* dest = (int*)(p_args->output);
-//     register const int* src0 = (const int*)(p_args->input0);
-//     register const int* src1 = (const int*)(p_args->input1);
-//     register size_t size = p_args->size / 4;
+    // Create and run threads
+    for (int i = 0; i < num_threads; i++) {
+        
+         printf("i: %d\n", i);
+        // Set thread arguments
+        thread_args[i].size = (i < remaining) ? chunk_size + 1 : chunk_size;
+        thread_args[i].dest = output + i * chunk_size;
+        thread_args[i].spotPrice = input0 + i * chunk_size;
+        thread_args[i].strikePrice = input1 + i * chunk_size;
+        thread_args[i].riskFreeRate = input2 + i * chunk_size;
+        thread_args[i].volatility = input3 + i * chunk_size;
+        thread_args[i].timeToMaturity = input4 + i * chunk_size;
+        thread_args[i].optionType = input5 + i * chunk_size;
+        thread_args[i].num_threads = num_threads;
+        thread_args[i].cpu = cpu_cores[i];
 
-//     register size_t nthreads = p_args->nthreads - 1;
-//     register size_t cpu = p_args->cpu;
+        // Create and run the thread
+        pthread_create(&tid[i], NULL, blackScholesWorker, &thread_args[i]);
+    }
 
-//     /* Create all threads */
-//     pthread_t tid[nthreads];
-//     args_t targs[nthreads];
-//     cpu_set_t cpuset[nthreads];
-
-//     /* Assign current CPU to us */
-//     tid[0] = pthread_self();
-
-//     /* Affinity */
-//     CPU_ZERO(&(cpuset[0]));
-//     CPU_SET(cpu, &(cpuset[0]));
-
-//     /* Set affinity */
-//     int res_affinity_0 = pthread_setaffinity_np(tid[0], sizeof(cpuset[0]), &(cpuset[0]));
-
-//     /* Amount of work per thread */
-//     size_t size_per_thread = size / nthreads;
-
-//     for (int i = 1; i < nthreads; i++) {
-//         /* Initialize the argument structure */
-//         targs[i].size = size_per_thread;
-//         targs[i].input0 = (byte*)(src0 + (i * size_per_thread));
-//         targs[i].input1 = (byte*)(src1 + (i * size_per_thread));
-//         targs[i].output = (byte*)(dest + (i * size_per_thread));
-
-//         targs[i].cpu = (cpu + i) % nthreads;
-//         targs[i].nthreads = nthreads;
-
-//         /* Affinity */
-//         CPU_ZERO(&(cpuset[i]));
-//         CPU_SET(targs[i].cpu, &(cpuset[i]));
-
-//         /* Set affinity */
-//         int res = pthread_create(&tid[i], NULL, worker, (void*)&targs[i]);
-//         int res_affinity = pthread_setaffinity_np(tid[i], sizeof(cpuset[i]), &(cpuset[i]));
-//     }
-
-//     /* Perform one portion of the work */
-//     for (int i = 0; i < size_per_thread; i++) {
-//         dest[i] = src0[i] + src1[i];
-//     }
-
-//     /* Perform trailing elements */
-//     int remaining = size % nthreads;
-//     for (int i = size - remaining; i < size; i++) {
-//         dest[i] = src0[i] + src1[i];
-//     }
-
-//     /* Wait for all threads to finish execution */
-//     for (int i = 0; i < nthreads; i++) {
-//         pthread_join(tid[i], NULL);
-//     }
-
-//     /* Done */
-//     return 0;
-// }
-
-
-
-// void* blackScholesThread(void* arg) {
-//     // OptionData* dataset = (OptionData*)arg;
-//         int index = *((int*)arg);
-//     int chunk_size = DATASET_SIZE / num_threads;
-//     int start = index * chunk_size;
-//     int end = (index == num_threads - 1) ? DATASET_SIZE : start + chunk_size;
-
-//     for (int i = start; i < end; i++) { // Assuming 2 threads for simplicity
-//         float price = blackScholes(dataset[i].spotPrice, dataset[i].strikePrice,
-//                                    dataset[i].riskFreeRate, dataset[i].volatility,
-//                                    dataset[i].timeToMaturity, dataset[i].optionType);
-//         printf("Thread: %ld, Data point: %d, Option Price: %f\n", (unsigned long)pthread_self(), i, price);
-//     }
-//     free(arg);
-//     return NULL;
-// }
-
-// int main() {
-//     srand(time(NULL)); // Seed for random number generation
-//     OptionData dataset[DATASET_SIZE];
-
-//     // Generate dataset
-//     for (int i = 0; i < DATASET_SIZE; i++) {
-//         dataset[i] = generateRandomData();
-//     }
-
-//     // Iterate over dataset and calculate option prices
-//     for (int i = 0; i < DATASET_SIZE; i++) {
-//         float price = blackScholes(dataset[i].spotPrice, dataset[i].strikePrice,
-//                                    dataset[i].riskFreeRate, dataset[i].volatility,
-//                                    dataset[i].timeToMaturity, dataset[i].optionType);
-//         printf("Option Price for data point %d: %f\n", i, price);
-//     }
-
-//     pthread_t threads[2]; // Creating two threads
-
-//     // Launch threads
-//     for (int i = 0; i < 2; i++) {
-//         pthread_create(&threads[i], NULL, blackScholesThread, (void*)(dataset + i * (DATASET_SIZE / 2)));
-//     }
-
-//     // Wait for threads to complete
-//     for (int i = 0; i < 2; i++) {
-//         pthread_join(threads[i], NULL);
-//     }
-
-//     return 0;
-
-// }
+    // Wait for all threads to finish
+    for (int i = 0; i < num_threads; i++) {
+        pthread_join(tid[i], NULL);
+    }
+}
 
 int get_num_threads()
 {
@@ -329,6 +250,15 @@ int main()
         dataset[i] = generateRandomData();
     }
 
+     // Initialize arrays for input and output
+    float spotPrice[DATASET_SIZE];
+    float strikePrice[DATASET_SIZE];
+    float riskFreeRate[DATASET_SIZE];
+    float volatility[DATASET_SIZE];
+    float timeToMaturity[DATASET_SIZE];
+    int optionType[DATASET_SIZE];
+    float optionPrice[DATASET_SIZE];
+
     // Start timing for SISD
     clock_t start_sisd = clock();
     // Perform single-threaded Black-Scholes computation
@@ -345,34 +275,15 @@ int main()
 
     // Start timing for MIMD
     clock_t start_mimd = clock();
-    // pthread_t threads[2]; // Creating two threads
-    // Launch threads
-    // for (int i = 0; i < 2; i++) {
-    //     pthread_create(&threads[i], NULL, blackScholesThread, (void*)(dataset + i * (DATASET_SIZE / 2)));
-    // }
-    int num_threads = get_num_threads();
-    pthread_t threads[num_threads];
 
-    for (int i = 0; i < num_threads; i++)
-    {
-        ThreadArg *args = malloc(sizeof(ThreadArg));
-        args->dataset = dataset;
-        args->start_index = i * (DATASET_SIZE / num_threads);
-        args->end_index = (i == num_threads - 1) ? DATASET_SIZE : (i + 1) * (DATASET_SIZE / num_threads);
-        pthread_create(&threads[i], NULL, blackScholesThread, args);
-    }
+   // Set the number of threads you want to use
+    int num_threads = get_num_threads(); // You can adjust this as needed
 
-    for (int i = 0; i < num_threads; i++)
-    {
-        pthread_join(threads[i], NULL);
-    }
+    // Perform Black-Scholes calculations in parallel
+    impl_parallel(optionPrice, spotPrice, strikePrice, riskFreeRate, volatility,
+                  timeToMaturity, optionType, DATASET_SIZE, num_threads);
 
-    // Wait for threads to complete
-    for (int i = 0; i < 2; i++)
-    {
-        pthread_join(threads[i], NULL);
-    }
-    // impl_parallel(&args);
+
     // Stop timing for MIMD
     clock_t end_mimd = clock();
     double time_mimd = (double)(end_mimd - start_mimd) / CLOCKS_PER_SEC;
