@@ -7,21 +7,20 @@
 #include <sched.h>
 
 
-#define DATASET_SIZE 201
 
-typedef struct
-{
-    float* dest;            // Array to store option prices
-    float* spotPrice;       // Pointer to spotPrice array
-    float* strikePrice;     // Pointer to strikePrice array
-    float* riskFreeRate;    // Pointer to riskFreeRate array
-    float* volatility;      // Pointer to volatility array
-    float* timeToMaturity; // Pointer to timeToMaturity array
-    int* optionType;        // Pointer to optionType array
-    size_t size;            // Number of data points to process
-    int num_threads;        // Number of threads
-    int cpu;
+// #define DATASET_SIZE 100000
+
+typedef struct {
+    float* dest;
+    float* spotPrice;
+    float* strikePrice;
+    float* riskFreeRate;
+    float* volatility;
+    float* timeToMaturity;
+    int* optionType;
+    size_t size;
 } ThreadArgs;
+
 
 typedef struct
 {
@@ -43,6 +42,78 @@ OptionData generateRandomData()
     data.timeToMaturity = (float)rand() / (float)(RAND_MAX) * 2;
     data.optionType = rand() % 2;
     return data;
+}
+
+
+
+int countRecordsInFile(const char* filename) {
+    FILE* file = fopen(filename, "r");
+    if (!file) {
+        perror("Error opening file");
+        return -1;
+    }
+
+    int count = 0;
+    char buffer[256]; // Assuming each line will not exceed 255 characters
+
+    while (fgets(buffer, sizeof(buffer), file)) {
+        // Check if the line matches the expected format
+        if (sscanf(buffer, " { %*f , %*f , %*f , %*f , %*f , %*f , \"%*[CP]\" , %*f , %*f } ,") == 0) {
+            count++;
+        }
+    }
+
+    fclose(file);
+    return count;
+}
+
+
+int readDataFromFile(const char* filename, OptionData* dataset, int maxSize) {
+    FILE* file = fopen(filename, "r");
+    if (!file) {
+        perror("Error opening file");
+        return -1;
+    }
+
+    int i = 0;
+    char optionTypeStr[10]; // Buffer to store the option type string
+    while (i < maxSize) {
+        if (fscanf(file, " { %f , %f , %f , %*f , %f , %f , \"%[CP]\" , %*f , %*f } ,",
+                        &dataset[i].spotPrice,
+                        &dataset[i].strikePrice,
+                        &dataset[i].riskFreeRate,
+                        &dataset[i].volatility,
+                        &dataset[i].timeToMaturity,
+                        optionTypeStr) == 6) {
+            dataset[i].optionType = (optionTypeStr[0] == 'C') ? 0 : 1;
+            i++;
+        } else {
+            break; // Break the loop if the line doesn't match the expected format
+        }
+    }
+
+    fclose(file);
+    return i; // Return the number of records read
+}
+
+
+OptionData* allocateDataset(int size) {
+    return (OptionData*)malloc(size * sizeof(OptionData));
+}
+
+int get_num_threads()
+{
+    long num_cores;
+
+    num_cores = sysconf(_SC_NPROCESSORS_ONLN); // Get the number of online processors
+
+    if (num_cores == -1)
+    {
+        // In case of an error, default to a conservative number of threads
+        return 2;
+    }
+
+    return (int)num_cores;
 }
 
 #define inv_sqrt_2xPI 0.39894228040143270286
@@ -170,7 +241,7 @@ void* blackScholesWorker(void* args) {
     register const int*   optionType = (const int*)(p_args->optionType);
     register size_t size = p_args->size;
 
-    for (int i = 0; i < size; i++) {
+    for (int i = 0; i < p_args->size; i++) {
         dest[i] = blackScholes(spotPrice[i], strikePrice[i], riskFreeRate[i],
                                volatility[i], timeToMaturity[i], optionType[i]);
     }
@@ -178,91 +249,87 @@ void* blackScholesWorker(void* args) {
     return NULL;
 }
 
-void impl_parallel(float* output,  float* input0,  float* input1,  float* input2,
-                    float* input3,  float* input4,  int* input5, size_t size, int num_threads) {
-    // Create an array of pthread_t to hold thread IDs
-    pthread_t tid[num_threads];
+int optimal_thread_count_for_workload(size_t dataset_size, int max_threads) {
+    int optimal_threads = (int)ceil(dataset_size / 50.0); // Example heuristic
+    if (optimal_threads > max_threads) {
+        optimal_threads = max_threads;
+    }
+    printf("ffff %d\n",optimal_threads);
+    return optimal_threads > 0 ? optimal_threads : 1;
+}
 
-    // Create an array of args_t to hold thread arguments
-    ThreadArgs thread_args[num_threads];
+void impl_parallel(ThreadArgs* args) {
+    int max_threads = get_num_threads();
+    int num_threads = optimal_thread_count_for_workload(args->size, max_threads);
 
-    // Calculate the size of work for each thread
-    size_t chunk_size = size / num_threads;
-    size_t remaining = size % num_threads;
-    // Initialize CPU cores to be used by threads
-    int cpu_cores[num_threads];
-    for (int i = 0; i < num_threads; i++) {
-         printf("The value of  is: %d\n", num_threads);
+    pthread_t* tid = malloc(num_threads * sizeof(pthread_t));
+    ThreadArgs* thread_args = malloc(num_threads * sizeof(ThreadArgs));
 
-        cpu_cores[i] = i ; // Assign cores sequentially
-        printf("The value of num is: %d\n", cpu_cores[i]);
-
+    if (!tid || !thread_args) {
+        perror("Failed to allocate memory for threads");
+        if (tid) free(tid);
+        if (thread_args) free(thread_args);
+        exit(EXIT_FAILURE);
     }
 
-    // Create and run threads
-    for (int i = 0; i < num_threads; i++) {
-        
-         printf("i: %d\n", i);
-        // Set thread arguments
-        thread_args[i].size = (i < remaining) ? chunk_size + 1 : chunk_size;
-        thread_args[i].dest = output + i * chunk_size;
-        thread_args[i].spotPrice = input0 + i * chunk_size;
-        thread_args[i].strikePrice = input1 + i * chunk_size;
-        thread_args[i].riskFreeRate = input2 + i * chunk_size;
-        thread_args[i].volatility = input3 + i * chunk_size;
-        thread_args[i].timeToMaturity = input4 + i * chunk_size;
-        thread_args[i].optionType = input5 + i * chunk_size;
-        thread_args[i].num_threads = num_threads;
-        thread_args[i].cpu = cpu_cores[i];
+    size_t batch_size = args->size / num_threads;
+    size_t remaining = args->size % num_threads;
+    size_t start = 0;
 
-        // Create and run the thread
+    for (int i = 0; i < num_threads; i++) {
+        size_t thread_batch_size = batch_size + (i < remaining ? 1 : 0);
+
+        thread_args[i].size = thread_batch_size;
+        thread_args[i].dest = args->dest + start;
+        thread_args[i].spotPrice = args->spotPrice + start;
+        thread_args[i].strikePrice = args->strikePrice + start;
+        thread_args[i].riskFreeRate = args->riskFreeRate + start;
+        thread_args[i].volatility = args->volatility + start;
+        thread_args[i].timeToMaturity = args->timeToMaturity + start;
+        thread_args[i].optionType = args->optionType + start;
+
         pthread_create(&tid[i], NULL, blackScholesWorker, &thread_args[i]);
+        start += thread_batch_size;
     }
 
-    // Wait for all threads to finish
     for (int i = 0; i < num_threads; i++) {
         pthread_join(tid[i], NULL);
     }
+
+    free(tid);
+    free(thread_args);
 }
 
-int get_num_threads()
-{
-    long num_cores;
 
-    num_cores = sysconf(_SC_NPROCESSORS_ONLN); // Get the number of online processors
+int main() {
+    const char* filename = "/Users/amanyats/Desktop/COE-231/project/optionData.txt";
 
-    if (num_cores == -1)
-    {
-        // In case of an error, default to a conservative number of threads
-        return 2;
+    // Count the number of records in the file
+    int datasetSize = countRecordsInFile(filename);
+    if (datasetSize <= 0) {
+        fprintf(stderr, "Failed to read data from the file\n");
+        return 1;
     }
 
-    return (int)num_cores;
-}
-int main()
-{
-    srand(time(NULL)); // Seed for random number generation
-    OptionData dataset[DATASET_SIZE];
-
-    // Generate dataset
-    for (int i = 0; i < DATASET_SIZE; i++)
-    {
-        dataset[i] = generateRandomData();
+    // Dynamically allocate memory for the dataset
+    OptionData* dataset = allocateDataset(datasetSize);
+    if (!dataset) {
+        fprintf(stderr, "Failed to allocate memory for the dataset\n");
+        return 1;
     }
 
-     // Initialize arrays for input and output
-    float spotPrice[DATASET_SIZE];
-    float strikePrice[DATASET_SIZE];
-    float riskFreeRate[DATASET_SIZE];
-    float volatility[DATASET_SIZE];
-    float timeToMaturity[DATASET_SIZE];
-    int optionType[DATASET_SIZE];
-    float optionPrice[DATASET_SIZE];
+    // Read data from file
+    if (readDataFromFile(filename, dataset, datasetSize) != datasetSize) {
+        fprintf(stderr, "Error reading data from file\n");
+        free(dataset);
+        return 1;
+    }
+
 
     // Start timing for SISD
     clock_t start_sisd = clock();
     // Perform single-threaded Black-Scholes computation
-    for (int i = 0; i < DATASET_SIZE; i++)
+    for (int i = 0; i < datasetSize; i++)
     {
         float price = blackScholes(dataset[i].spotPrice, dataset[i].strikePrice,
                                    dataset[i].riskFreeRate, dataset[i].volatility,
@@ -273,24 +340,67 @@ int main()
     clock_t end_sisd = clock();
     double time_sisd = (double)(end_sisd - start_sisd) / CLOCKS_PER_SEC;
 
-    // Start timing for MIMD
-    clock_t start_mimd = clock();
 
-   // Set the number of threads you want to use
-    int num_threads = get_num_threads(); // You can adjust this as needed
+    // Initialize arrays for input and output
+    float* spotPrice = (float*)malloc(datasetSize * sizeof(float));
+    float* strikePrice = (float*)malloc(datasetSize * sizeof(float));
+    float* riskFreeRate = (float*)malloc(datasetSize * sizeof(float));
+    float* volatility = (float*)malloc(datasetSize * sizeof(float));
+    float* timeToMaturity = (float*)malloc(datasetSize * sizeof(float));
+    int* optionType = (int*)malloc(datasetSize * sizeof(int));
+    float* optionPrice = (float*)malloc(datasetSize * sizeof(float));
+
+    if (!spotPrice || !strikePrice || !riskFreeRate || !volatility || !timeToMaturity || !optionType || !optionPrice) {
+        fprintf(stderr, "Failed to allocate memory for arrays\n");
+        free(spotPrice);
+        free(strikePrice);
+        free(riskFreeRate);
+        free(volatility);
+        free(timeToMaturity);
+        free(optionType);
+        free(optionPrice);
+        free(dataset);
+        return 1;
+    }
+
+    // Populate input arrays from the dataset
+    for (int i = 0; i < datasetSize; i++) {
+        spotPrice[i] = dataset[i].spotPrice;
+        strikePrice[i] = dataset[i].strikePrice;
+        riskFreeRate[i] = dataset[i].riskFreeRate;
+        volatility[i] = dataset[i].volatility;
+        timeToMaturity[i] = dataset[i].timeToMaturity;
+        optionType[i] = dataset[i].optionType;
+    }
 
     // Perform Black-Scholes calculations in parallel
-    impl_parallel(optionPrice, spotPrice, strikePrice, riskFreeRate, volatility,
-                  timeToMaturity, optionType, DATASET_SIZE, num_threads);
+    ThreadArgs args;
+    args.dest = optionPrice;
+    args.spotPrice = spotPrice;
+    args.strikePrice = strikePrice;
+    args.riskFreeRate = riskFreeRate;
+    args.volatility = volatility;
+    args.timeToMaturity = timeToMaturity;
+    args.optionType = optionType;
+    args.size = datasetSize;
 
-
-    // Stop timing for MIMD
+    clock_t start_mimd = clock();
+    impl_parallel(&args);
     clock_t end_mimd = clock();
     double time_mimd = (double)(end_mimd - start_mimd) / CLOCKS_PER_SEC;
-
-    // Print the results
     printf("Time taken for SISD: %f seconds\n", time_sisd);
+
     printf("Time taken for MIMD: %f seconds\n", time_mimd);
+
+    // Free dynamically allocated memory
+    free(spotPrice);
+    free(strikePrice);
+    free(riskFreeRate);
+    free(volatility);
+    free(timeToMaturity);
+    free(optionType);
+    free(optionPrice);
+    free(dataset);
 
     return 0;
 }
